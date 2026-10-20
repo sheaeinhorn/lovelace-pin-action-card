@@ -1,7 +1,6 @@
 # PIN Action Card
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/docs/faq/custom_repositories)
-[![Validate](https://github.com/sheaeinhorn/lovelace-pin-action-card/actions/workflows/validate.yml/badge.svg)](https://github.com/sheaeinhorn/lovelace-pin-action-card/actions/workflows/validate.yml)
 
 A Home Assistant dashboard card that shows a **PIN keypad** and, when the right PIN is entered, **runs any action**: navigate to a view, perform an action (service call), toggle an entity, open a URL, show more-info, and more. It can also **reveal a hidden card** with an auto-relock timer.
 
