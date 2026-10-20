@@ -16,6 +16,7 @@ Inspired by [lovelace-pin-lock-card](https://github.com/qlerup/lovelace-pin-lock
 - Optional **inner card** that is shown only while unlocked, with an auto-relock countdown and a "Lock" button
 - Action on wrong PIN (for example: send a notification)
 - Lockout after too many wrong attempts
+- **Inactivity timeout**: navigate back (or run any action) after no taps for a while. The timer restarts while someone is still using the screen.
 - Masked input, auto submit, and a GUI editor with Home Assistant's action picker
 - Follows your Home Assistant theme
 
@@ -46,7 +47,10 @@ HACS adds the dashboard resource for you (`/hacsfiles/lovelace-pin-action-card/p
 | `codes` | list | **required** | PINs that are accepted. Each one is a string, or an object with `code`, `name` and `action` (see [Per-code actions](#per-code-actions)). **Put the PINs in quotes** so leading zeros are kept. |
 | `unlock_action` | action or list | – | What to do after a correct PIN |
 | `wrong_action` | action or list | – | What to do after a wrong PIN |
-| `lockout_action` | action or list | – | What to do when the keypad is locked out |
+| `lockout_action` | action or list | – | What to do when the keypad is locked out after too many wrong PINs |
+| `idle_seconds` | number | `0` | Inactivity timeout after unlocking. Every tap, key press, scroll or mouse move restarts it. `0` turns it off. |
+| `idle_action` | action or list | navigate back | What to do after `idle_seconds` with no activity. If the unlock action navigates somewhere, the default is to navigate back to the page with the PIN card. |
+| `idle_paths` | list | the unlock action's `navigation_path`s | `idle_action` only runs if the user is still on one of these pages (or a sub-page). That way a user who has already left isn't pulled back. Use `[]` to always run it. |
 | `card` | card config | – | Card to show while unlocked |
 | `relock_seconds` | number | `60` | Relock the inner card after this many seconds. `0` means it only relocks when you press **Lock**. |
 | `max_attempts` | number | `0` | Number of wrong attempts before a lockout. `0` means unlimited attempts. |
@@ -112,6 +116,38 @@ unlock_action:
   - action: navigate
     navigation_path: /lovelace/home
 ```
+
+### Go back after inactivity
+
+Unlock opens the admin view. Once nobody has touched the screen for 2 minutes, the card navigates back to the page with the PIN card. Every tap, swipe or key press restarts the 2 minutes. If the user has already left the admin view, nothing happens.
+
+```yaml
+type: custom:pin-action-card
+title: Admin
+codes:
+  - "1234"
+unlock_action:
+  action: navigate
+  navigation_path: /lovelace/admin
+idle_seconds: 120
+```
+
+You can choose your own `idle_action`, for example go to a specific view and turn off the screen:
+
+```yaml
+idle_seconds: 300
+idle_action:
+  - action: navigate
+    navigation_path: /lovelace/home
+  - action: perform-action
+    perform_action: switch.turn_off
+    target:
+      entity_id: switch.tablet_screen
+```
+
+`idle_seconds` also relocks an inner `card`. Set `relock_seconds: 0` to relock the card only after inactivity, not on a fixed timer.
+
+The timer runs in the browser tab, so it stops if the page is reloaded.
 
 ### Per-code actions
 

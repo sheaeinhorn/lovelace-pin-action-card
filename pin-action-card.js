@@ -7,7 +7,7 @@
  * This is a convenience lock, not real security.
  */
 
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.1.0";
 
 const DEFAULTS = {
   title: "PIN Lock",
@@ -52,6 +52,54 @@ const toCssWidth = (v) => {
 };
 
 const asList = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
+
+const haRoot = () => document.querySelector("home-assistant");
+
+const stripQuery = (p) => String(p).split(/[?#]/)[0].replace(/\/+$/, "") || "/";
+
+const onPath = (prefix) => {
+  const p = stripQuery(prefix);
+  const here = stripQuery(location.pathname);
+  return here === p || here.startsWith(`${p}/`);
+};
+
+const ACTIVITY_EVENTS = ["pointerdown", "pointermove", "keydown", "wheel", "touchstart", "scroll"];
+
+/**
+ * One global inactivity session. It outlives the card element, so it keeps
+ * counting after the user navigated to the protected view.
+ */
+const idleWatcher = {
+  session: null,
+  last: 0,
+  timer: null,
+  bump() {
+    idleWatcher.last = Date.now();
+  },
+  start(session) {
+    this.stop();
+    this.session = session;
+    this.last = Date.now();
+    ACTIVITY_EVENTS.forEach((e) => window.addEventListener(e, this.bump, { capture: true, passive: true }));
+    this.timer = setInterval(() => this.check(), 1000);
+  },
+  stop(owner) {
+    if (owner && this.session?.owner !== owner) return;
+    ACTIVITY_EVENTS.forEach((e) => window.removeEventListener(e, this.bump, { capture: true }));
+    clearInterval(this.timer);
+    this.timer = null;
+    this.session = null;
+  },
+  remaining() {
+    return this.session ? Math.max(0, this.session.seconds * 1000 - (Date.now() - this.last)) : 0;
+  },
+  check() {
+    const s = this.session;
+    if (!s || this.remaining() > 0) return;
+    this.stop();
+    s.onIdle();
+  },
+};
 
 const STYLE = `
   :host { display: block; }
@@ -234,8 +282,10 @@ class PinActionCard extends HTMLElement {
     e.hint.hidden = this._unlocked || !c.hint;
     e.panel.hidden = this._unlocked;
     e.lockBtn.hidden = !this._unlocked;
-    e.status.textContent =
-      this._unlocked && this._unlockUntil ? `${Math.max(0, Math.ceil((this._unlockUntil - now) / 1000))}s` : "";
+    const idleLeft = idleWatcher.session?.owner === this ? idleWatcher.remaining() : 0;
+    const relockLeft = this._unlockUntil ? this._unlockUntil - now : 0;
+    const left = [relockLeft, idleLeft].filter((v) => v > 0);
+    e.status.textContent = this._unlocked && left.length ? `${Math.ceil(Math.min(...left) / 1000)}s` : "";
 
     if (lockedOut) {
       e.display.textContent = `Locked · ${Math.ceil((this._lockoutUntil - now) / 1000)}s`;
@@ -325,6 +375,8 @@ class PinActionCard extends HTMLElement {
     this._attempts = 0;
     const actions = match.action ?? match.unlock_action ?? c.unlock_action;
 
+    this._startIdle(asList(actions));
+
     if (c.card) {
       this._unlocked = true;
       const relock = Number(c.relock_seconds);
@@ -342,7 +394,30 @@ class PinActionCard extends HTMLElement {
     await this._runActions(actions);
   }
 
+  _startIdle(actions) {
+    const c = this._config;
+    const seconds = Number(c.idle_seconds) || 0;
+    if (seconds <= 0) return;
+    const unlockPath = location.pathname;
+    const navTargets = actions.filter((a) => a?.action === "navigate" && a.navigation_path).map((a) => a.navigation_path);
+    const paths = asList(c.idle_paths ?? navTargets);
+    const idleActions =
+      c.idle_action ?? (navTargets.length ? { action: "navigate", navigation_path: unlockPath } : { action: "none" });
+
+    idleWatcher.start({
+      owner: this,
+      seconds,
+      onIdle: () => {
+        if (this._unlocked) this._lock();
+        // Only kick the user out if they are still on a protected page.
+        if (paths.length && !paths.some(onPath)) return;
+        this._runActions(idleActions);
+      },
+    });
+  }
+
   _lock(update = true) {
+    idleWatcher.stop(this);
     this._unlocked = false;
     this._unlockUntil = 0;
     this._entry = "";
@@ -353,7 +428,7 @@ class PinActionCard extends HTMLElement {
   // ---------- timer ----------
 
   _syncTimer() {
-    const needed = (this._unlocked && this._unlockUntil) || this._lockoutUntil > Date.now();
+    const needed = (this._unlocked && (this._unlockUntil || idleWatcher.session?.owner === this)) || this._lockoutUntil > Date.now();
     if (needed && !this._timer && this.isConnected) {
       this._timer = setInterval(() => this._tick(), 1000);
     } else if (!needed) {
@@ -411,6 +486,14 @@ class PinActionCard extends HTMLElement {
     }
   }
 
+  _getHass() {
+    return haRoot()?.hass || this._hass;
+  }
+
+  _eventNode() {
+    return this.isConnected ? this : haRoot() || window;
+  }
+
   async _runAction(a) {
     if (!a || typeof a !== "object") return;
     const type = a.action || (a.perform_action || a.service ? "perform-action" : "none");
@@ -429,16 +512,16 @@ class PinActionCard extends HTMLElement {
         const svc = a.perform_action || a.service;
         if (!svc || !svc.includes(".")) throw new Error(`Invalid action "${svc}"`);
         const [domain, service] = svc.split(".", 2);
-        return this._hass.callService(domain, service, a.data || a.service_data || {}, a.target);
+        return this._getHass().callService(domain, service, a.data || a.service_data || {}, a.target);
       }
       case "toggle":
         if (!entity) throw new Error("toggle needs an entity");
-        return this._hass.callService("homeassistant", "toggle", { entity_id: entity });
+        return this._getHass().callService("homeassistant", "toggle", { entity_id: entity });
       case "more-info":
-        if (entity) fireEvent(this, "hass-more-info", { entityId: entity });
+        if (entity) fireEvent(this._eventNode(), "hass-more-info", { entityId: entity });
         return;
       case "fire-dom-event":
-        fireEvent(this, "ll-custom", a);
+        fireEvent(this._eventNode(), "ll-custom", a);
         return;
       case "delay":
         return new Promise((r) => setTimeout(r, (Number(a.seconds) || 0) * 1000));
@@ -446,7 +529,7 @@ class PinActionCard extends HTMLElement {
         return this._lock();
       default:
         // Let Home Assistant's own action handler deal with anything else (e.g. "assist").
-        fireEvent(this, "hass-action", { config: { tap_action: a, entity }, action: "tap" });
+        fireEvent(this._eventNode(), "hass-action", { config: { tap_action: a, entity }, action: "tap" });
     }
   }
 }
@@ -466,9 +549,13 @@ const LABELS = {
   max_attempts: "Max attempts (0 = unlimited)",
   lockout_seconds: "Lockout (seconds)",
   success_message: "Success message",
+  idle_seconds: "Inactivity timeout (seconds, 0 = off)",
+  idle_action: "Action after inactivity",
 };
 
 const HELPERS = {
+  idle_seconds: "Any tap, key press or scroll restarts the timer",
+  idle_action: "Default: navigate back to the PIN page",
   relock_seconds: "Only used when an inner card is configured",
   auto_submit: "Submit automatically when a full PIN has been typed",
 };
@@ -494,6 +581,8 @@ class PinActionCardEditor extends HTMLElement {
       grid({ name: "mask_input", selector: { boolean: {} } }, { name: "auto_submit", selector: { boolean: {} } }),
       ...(Array.isArray(c.unlock_action) ? [] : [{ name: "unlock_action", selector: { ui_action: {} } }]),
       ...(Array.isArray(c.wrong_action) ? [] : [{ name: "wrong_action", selector: { ui_action: {} } }]),
+      { name: "idle_seconds", selector: { number: { min: 0, mode: "box", unit_of_measurement: "s" } } },
+      ...(Array.isArray(c.idle_action) ? [] : [{ name: "idle_action", selector: { ui_action: {} } }]),
       grid(
         { name: "max_attempts", selector: { number: { min: 0, mode: "box" } } },
         { name: "lockout_seconds", selector: { number: { min: 1, mode: "box", unit_of_measurement: "s" } } },
